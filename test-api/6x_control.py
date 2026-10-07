@@ -3,6 +3,7 @@ import sys
 import websocket
 import json
 import argparse
+import threading
 
 from websocket import WebSocket
 from time import sleep
@@ -267,7 +268,41 @@ class CameraConn:
         self.ws.send(message)
         print("Calibration Capture Started")
 
-    def toggle_verbose(self):
+    def _listenForCaptureEvents(self, t_event: threading.Event):
+        '''
+        Listens for capture events from the camera and prints the total number of images captured.
+
+        Args:
+        t_event (threading.Event): Event to signal when to stop listening for capture events
+        '''
+        total_images_captured:int = 0
+        while not t_event.is_set():
+            msg: dict = self.readFromWs()
+            if msg.get("topic") == "/topic_image_captured" and msg["msg"]["total_requests"] > total_images_captured:
+                total_images_captured = msg["msg"]["total_requests"]
+                print(f"Image captured\nmsg: {msg}\nTotal images captured: {total_images_captured}")
+
+
+    def listenCapture(self):
+        '''
+        Command from user to start listening for capture events from the camera
+        
+        A subscription ROS message is created to listen for capture events
+        '''
+        print("Listening for capture events. Type 'q' to stop.")
+        sub_msg = self._createRosSubscribeMessage("topic_image_captured", "custom_msgs/ImageCaptured", 0)
+        self.ws.send(sub_msg)
+        usr_input:str = ""
+        t_event = threading.Event()
+        thread = threading.Thread(target=self._listenForCaptureEvents, args=(t_event,))
+        thread.start()
+        while usr_input.casefold() != "q":
+            usr_input = input().strip()
+        t_event.set()
+        thread.join()
+        print("Stopped listening for capture events")
+
+    def toggleVerbose(self):
         '''Flips on and off verbose mode to choose to see the incoming and outgoing ROS messages printed to the user'''
         self.verbose_mode = not self.verbose_mode
         print(f"verbose mode: {self.verbose_mode}")
@@ -327,8 +362,10 @@ while True:
         camera_conn.captureImage() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
     elif command == "cal":
         camera_conn.calibrate() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
+    elif command == "listen_capture":
+        camera_conn.listenCapture() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
     elif command == "verbose":
-        camera_conn.toggle_verbose()
+        camera_conn.toggleVerbose()
     elif command == "exit":
         if camera_conn.connected:
             camera_conn.closeConnection()
