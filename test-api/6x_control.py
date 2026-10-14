@@ -77,6 +77,12 @@ class CameraConn:
         self._setBandInfo(result)
 
     def _setBandInfo(self, result: dict) -> None:
+        '''
+        Private helper function to set the band information for each imager in the camera info.
+
+        Parameters:
+        result (dict): dictionary containing the camera info retrieved from the camera
+        '''
         for imager in result["values"]["imagers"]:
             new_band = self.BandInfo()
             band_name = ""
