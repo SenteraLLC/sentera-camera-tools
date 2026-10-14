@@ -2,7 +2,9 @@
 import sys
 import websocket
 import json
+from dataclasses import dataclass
 import argparse
+import threading
 
 from websocket import WebSocket
 from time import sleep
@@ -23,27 +25,77 @@ class CameraConn:
     some aid to users in integrating a 6x into their platform
     '''
 
+    @dataclass
+    class BandInfo:
+        id:int = 0
+        type: str = ""
+        band_cwl: int = 0
+        band_fwhm: int = 0
+
     ip:str = "192.168.42.1"
+    session_name:str = ""
     ws_connected:bool = False
     in_session:bool = False
     message_id:int = 20
     help_spacing:int = 32
     verbose_mode: bool = False
+    camera_info: dict = {}
 
     def __init__(self, verbose_mode: bool):
         self.verbose_mode = verbose_mode
         self.connectToCamera()
+        self._setCameraInfo()
         self.in_session = self.checkIfSessionActive()
 
     @property
     def connected(self) -> bool:
         '''Catching unexpected ws drops after start of connection'''
-        return (self.ws_connected and self.ws.connected)
+        return self.ws.connected
 
     @property
     def session_running(self) -> bool:
         '''Checks for camera's status on whether or not it has a capture session in progress'''
         return (self.connected and self.in_session)
+
+    def _setCameraInfo(self) -> None:
+        '''
+        Private helper function to set the camera information on the 6x
+
+        Parameters:
+        camera_info (dict): dictionary containing camera information to be set
+        '''
+        set_camera_info_msg = self._createRosCallServiceMessage(
+            "/get_camera_info",
+            "custom_srvs/srv/SetCameraInfo",
+            {}
+        )
+        self.ws.send(set_camera_info_msg)
+
+        result = self.readFromWs()
+        while result.get("service") != "/get_camera_info":            
+            result = self.readFromWs()
+        self._setBandInfo(result)
+
+    def _setBandInfo(self, result: dict) -> None:
+        '''
+        Private helper function to set the band information for each imager in the camera info.
+
+        Parameters:
+        result (dict): dictionary containing the camera info retrieved from the camera
+        '''
+        for imager in result["values"]["imagers"]:
+            new_band = self.BandInfo()
+            band_name = ""
+            if imager["type"] == "RGB":
+                new_band.type = imager["type"]
+                band_name = "rgb"
+            else:
+                new_band.id = imager["imager_rig_id"]
+                new_band.type = "Mono"
+                band_name = imager["band_name"][0]
+                new_band.band_cwl = imager["band_cwl"][0]
+                new_band.band_fwhm = imager["band_fwhm"][0]
+            self.camera_info[band_name] = new_band
 
     def _createMessage(self, op: str, **payload) -> str:
         '''
@@ -148,8 +200,8 @@ class CameraConn:
                 self.ws_connected = True
                 break
             except TimeoutError:
-                ip = input(f"could not connect to {self.ip}\nPlease enter a new ip.\n>>")
-                self.ip = ip
+                print(f"Timeout connecting to {self.ip}, retrying...")
+                continue
         print(f"Connected to {self.ip}")
 
     def closeConnection(self):
@@ -197,8 +249,9 @@ class CameraConn:
             result = self.readFromWs()
             sleep(0.5)
 
-        session_name = result["msg"]["name"] 
-        print(f"Connected to active session: {session_name}")
+        self.session_name = result["msg"]["name"] 
+        print(f"Connected to active session: {self.session_name}")
+        self._printSessionLocation()
         self.in_session = True
 
     def startSession(self, command_args: list[str]):
@@ -211,21 +264,20 @@ class CameraConn:
         Parameters:
         command_args (list[str]): name of the session supplied by the user split by spaces
         '''
-        session_name = ""
-        if camera_conn.in_session:
+        if self.in_session:
             print("Already connected to active session")
-        elif command_arg == "":
+        elif command_args == []:
             print("Please enter a session name with start command")
         else:
-            session_name = " ".join(command_args)
+            self.session_name = " ".join(command_args)
 
-        if session_name == "":
+        if self.session_name == "":
             return
 
         adver = self._createRosAdvertiseMessage("topic_session_start", "custom_msgs/SessionStart", 100)
         message = self._createRosPublishMessage(
             "topic_session_start",
-            {"name": session_name, "unix_epoch_ns": 0}
+            {"name": self.session_name, "unix_epoch_ns": 0}
         )
 
         self.ws.send(adver)
@@ -267,7 +319,72 @@ class CameraConn:
         self.ws.send(message)
         print("Calibration Capture Started")
 
-    def toggle_verbose(self):
+    def _printSessionLocation(self):
+        '''
+        Prints the location of the current session based on the session name.
+        '''
+        print(f"Session storage locations for session: {self.session_name}")
+        for band_name, band_info in self.camera_info.items():
+            if band_name != "rgb":
+                print(f"/data/snapshots/{self.session_name}/{band_info.id}-{band_name}-{band_info.band_cwl}-{band_info.band_fwhm}/")
+            else:
+                print(f"/data/snapshots/{self.session_name}/{band_name}/")
+
+    def _printNewImageLoc(self, capture_id: int):
+        '''
+        Prints the location of a newly captured image based on its capture ID.
+
+        Args:
+        capture_id (int): The ID of the captured image
+        '''
+        print("new image location for capture ID:", capture_id)
+        for band_name, band_info in self.camera_info.items():
+            if band_name != "rgb":
+                print(f"/data/snapshots/{self.session_name}/{band_info.id}-{band_name}-{band_info.band_cwl}-{band_info.band_fwhm}/IMG_{str(capture_id).rjust(4, '0')}.tif")
+            else:
+                print(f"/data/snapshots/{self.session_name}/{band_name}/IMG_{str(capture_id).rjust(4, '0')}.jpg")
+
+    def _listenForCaptureEvents(self, t_event: threading.Event):
+        '''
+        Listens for capture events from the camera and prints the total number of images captured.
+
+        Args:
+        t_event (threading.Event): Event to signal when to stop listening for capture events
+        '''
+        total_images_captured:int = 0
+        while not t_event.is_set():
+            msg: dict = self.readFromWs()
+            if msg.get("topic") == "/topic_image_captured" and msg["msg"]["total_requests"] > total_images_captured:
+                total_images_captured = msg["msg"]["total_requests"]
+                print(f"Image captured\nTotal images captured: {total_images_captured}")
+            if msg.get("topic") == "/topic_image_stored":
+                capture_id:int = msg["msg"]["id"] + 1
+                self._printNewImageLoc(capture_id)
+
+    def listenCapture(self):
+        '''
+        Command from user to start listening for capture events from the camera
+        
+        A subscription ROS message is created to listen for capture events
+        '''
+        print("Listening for capture events. Type 'q' to stop. Type 'c' to capture an image.")
+        image_captured_sub = self._createRosSubscribeMessage("topic_image_captured", "custom_msgs/ImageCaptured", 0)
+        self.ws.send(image_captured_sub)
+        image_stored_sub = self._createRosSubscribeMessage("topic_image_stored", "custom_msgs/ImageStored", 0)
+        self.ws.send(image_stored_sub)
+        usr_input:str = ""
+        t_event = threading.Event()
+        thread = threading.Thread(target=self._listenForCaptureEvents, args=(t_event,))
+        thread.start()
+        while usr_input.casefold() != "q":
+            usr_input = input().strip()
+            if usr_input.casefold() == "c":
+                self.captureImage()
+        t_event.set()
+        thread.join()
+        print("Stopped listening for capture events")
+
+    def toggleVerbose(self):
         '''Flips on and off verbose mode to choose to see the incoming and outgoing ROS messages printed to the user'''
         self.verbose_mode = not self.verbose_mode
         print(f"verbose mode: {self.verbose_mode}")
@@ -282,13 +399,21 @@ class CameraConn:
         self.sendSessionStatusSub()
         result = self.readFromWs()
         retries = 2
+        session_status = False
         while result.get("topic") != "/topic_session_status" and retries > 0:
             result = self.readFromWs()
             retries-=1
 
         if retries == 0:
-            return False
-        return result["msg"]["active"]
+            return session_status
+
+        session_status = result["msg"]["active"]
+        if session_status:
+            self.session_name = result['msg']['name']
+            self._printSessionLocation()
+        else:
+            print("No active session found on camera please start a session. Command: start <session_name>")
+        return session_status
 
     def printHelp(self):
         '''Prints available commands to screen'''
@@ -302,7 +427,7 @@ class CameraConn:
 
 
 # Print tool header and starting prompt.
-print("6X Camera Control (v1.3)")
+print("6X Camera Control (v1.4)")
 camera_conn = CameraConn(args.verbose)
 
 # Execute commands until 'exit' command.
@@ -327,8 +452,10 @@ while True:
         camera_conn.captureImage() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
     elif command == "cal":
         camera_conn.calibrate() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
+    elif command == "listen_capture":
+        camera_conn.listenCapture() if camera_conn.session_running else print("Not connected to a session. Please start or connect to session.")
     elif command == "verbose":
-        camera_conn.toggle_verbose()
+        camera_conn.toggleVerbose()
     elif command == "exit":
         if camera_conn.connected:
             camera_conn.closeConnection()
