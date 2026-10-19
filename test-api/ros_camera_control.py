@@ -20,9 +20,9 @@ args = parser.parse_args()
 
 class CameraConn:
     '''
-    Class representing a websocket connection to a 6x to allow for communication
+    Class representing a websocket connection to a Sentera camera to allow for communication
     to the onboard ROS system to perform a specific set of functions to allow for 
-    some aid to users in integrating a 6x into their platform
+    some aid to users in integrating a camera into their platform
     '''
 
     @dataclass
@@ -59,7 +59,7 @@ class CameraConn:
 
     def _setCameraInfo(self) -> None:
         '''
-        Private helper function to set the camera information on the 6x
+        Private helper function to set camera information
 
         Parameters:
         camera_info (dict): dictionary containing camera information to be set
@@ -421,13 +421,14 @@ class CameraConn:
         print(f'{"start <session_name>":<{self.help_spacing}} Begins a new session with name <session_name>')
         print(f'{"capture":<{self.help_spacing}} Triggers an image capture event')
         print(f'{"cal":<{self.help_spacing}} Starts a calibration capture')
+        print(f'{"listen_capture":<{self.help_spacing}} Listens for capture events and prints them to the console')
         print(f'{"verbose":<{self.help_spacing}} Toggle verbose mode to choose to view camera messages')
         print(f'{"exit":<{self.help_spacing}} Closes current connection and exits program')
         print()
 
 
 # Print tool header and starting prompt.
-print("6X Camera Control (v1.4)")
+print("ROS Camera Control app started")
 camera_conn = CameraConn(args.verbose)
 
 # Execute commands until 'exit' command.

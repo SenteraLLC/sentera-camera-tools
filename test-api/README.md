@@ -8,7 +8,7 @@ This directory collects scripts and examples that help customers and integrators
 | --- | --- | --- |
 | [`ros_camera_control.py`](ros_camera_control.py) | Interactive camera control example. Connects to the camera's ROS bridge over WebSocket and demonstrates topic subscriptions, advertisements and publishing, service calls, capture sessions, image capture, and calibration. | Python 3, `websocket-client`, and network access to the camera's bridge on port `9090`. Defaults to `ws://192.168.42.1:9090`. |
 
-## Quick start: 6X control
+## Quick start: ros_camera_control.py
 
 Run from the repository root:
 
